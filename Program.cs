@@ -141,9 +141,9 @@ public class MainForm : Form
 
     private static NumericUpDown NumberBox(int value, int min, int max) => new()
     {
-        Value = value,
         Minimum = min,
         Maximum = max,
+        Value = value,
         Width = 190,
         BackColor = Color.FromArgb(55, 55, 62),
         ForeColor = Color.White
