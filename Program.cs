@@ -1,7 +1,11 @@
+
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace SandpileSimulator;
@@ -18,52 +22,130 @@ internal static class Program
 
 public class MainForm : Form
 {
-    private int[,] field = new int[1000, 1000];
-    private int width = 1000, height = 1000;
-    private long lost = 0, totalSteps = 0;
-    private bool running = false, finishMode = false;
+    private const int MaxFieldSize = 10000;
+    private const int MaxPreviewSize = 2000;
+    private const int MaxGraphPoints = 5000;
 
-    private readonly System.Windows.Forms.Timer timer = new() { Interval = 30 };
-    private readonly PictureBox picture = new() { Dock = DockStyle.Fill, BackColor = Color.Black, SizeMode = PictureBoxSizeMode.Zoom };
-    private readonly Label status = new() { AutoSize = true, ForeColor = Color.White };
-    private readonly Label stats = new() { AutoSize = true, ForeColor = Color.White };
-    private readonly Panel graph = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(20, 20, 24) };
-    private readonly List<int> history = new();
+    // Ключ словаря: y * fieldWidth + x.
+    // Хранятся только клетки, в которых есть камни.
+    private Dictionary<int, long> field = new();
 
-    private NumericUpDown widthBox = new();
-    private NumericUpDown heightBox = new();
-    private NumericUpDown stonesBox = new();
+    private int fieldWidth = 1000;
+    private int fieldHeight = 1000;
 
-    private int activeCells = 0;
-    private Bitmap? currentBitmap;
+    private int steps;
+    private int activeCells;
+
+    private long lostStones;
+    private long initialStones = 1000;
+
+    private readonly List<int> activity = new();
+
+    // Цвета для 0, 1, 2 и 3+ камней.
+    private readonly Color[] cellColors =
+    {
+        Color.Black,
+        Color.FromArgb(184, 115, 51),
+        Color.FromArgb(0, 180, 75),
+        Color.White
+    };
+
+    private readonly SandpileView picture = new()
+    {
+        Dock = DockStyle.Fill,
+        BackColor = Color.Black
+    };
+
+    private readonly Label status = new()
+    {
+        Text = "Готово",
+        AutoSize = true,
+        ForeColor = Color.LightGreen
+    };
+
+    private readonly Label stats = new()
+    {
+        AutoSize = true,
+        ForeColor = Color.White
+    };
+
+    private readonly Panel graph = new()
+    {
+        Height = 180,
+        Width = 230,
+        BackColor = Color.FromArgb(35, 35, 42)
+    };
+
+    private readonly NumericUpDown widthBox =
+        NumberBox(1000, 10, MaxFieldSize);
+
+    private readonly NumericUpDown heightBox =
+        NumberBox(1000, 10, MaxFieldSize);
+
+    private readonly NumericUpDown stonesBox =
+        NumberBox(1000, 1, long.MaxValue);
+
+    private readonly System.Windows.Forms.Timer timer = new()
+    {
+        Interval = 30
+    };
 
     public MainForm()
     {
         Text = "Sandpile Simulator";
-        Width = 1250;
-        Height = 820;
-        MinimumSize = new Size(900, 600);
-        BackColor = Color.FromArgb(28, 28, 32);
+        Width = 1450;
+        Height = 850;
+        MinimumSize = new Size(1050, 650);
+        StartPosition = FormStartPosition.CenterScreen;
+        BackColor = Color.FromArgb(28, 28, 34);
         ForeColor = Color.White;
 
         BuildInterface();
-        ResetField();
+
         timer.Tick += TimerTick;
+
+        ResetField();
+    }
+
+    private static NumericUpDown NumberBox(
+        long value,
+        long min,
+        long max)
+    {
+        return new NumericUpDown
+        {
+            Minimum = min,
+            Maximum = max,
+            Value = value,
+            Width = 195,
+            ThousandsSeparator = true,
+            BackColor = Color.FromArgb(55, 55, 62),
+            ForeColor = Color.White
+        };
     }
 
     private void BuildInterface()
     {
-        var layout = new TableLayoutPanel
+        var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 3,
             RowCount = 1,
-            BackColor = BackColor
+            BackColor = Color.FromArgb(28, 28, 34)
         };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 245));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 245));
-        Controls.Add(layout);
+
+        root.ColumnStyles.Add(
+            new ColumnStyle(SizeType.Absolute, 245));
+
+        root.ColumnStyles.Add(
+            new ColumnStyle(SizeType.Percent, 100));
+
+        root.ColumnStyles.Add(
+            new ColumnStyle(SizeType.Absolute, 265));
+
+        Controls.Add(root);
+
+        // Левая панель
 
         var left = new FlowLayoutPanel
         {
@@ -72,144 +154,237 @@ public class MainForm : Form
             WrapContents = false,
             AutoScroll = true,
             Padding = new Padding(12),
-            BackColor = Color.FromArgb(36, 36, 42)
+            BackColor = Color.FromArgb(38, 38, 45)
         };
-        layout.Controls.Add(left, 0, 0);
+
+        root.Controls.Add(left, 0, 0);
 
         left.Controls.Add(Header("ПАРАМЕТРЫ ПОЛЯ"));
-        widthBox = NumberBox(1000, 10, 3000);
-        heightBox = NumberBox(1000, 10, 3000);
-        stonesBox = NumberBox(1000, 1, 100000000);
 
-        AddField(left, "Ширина:", widthBox);
-        AddField(left, "Высота:", heightBox);
-        AddField(left, "Камушков:", stonesBox);
+        left.Controls.Add(MakeLabel("Ширина поля:"));
+        left.Controls.Add(widthBox);
 
-        left.Controls.Add(MakeButton("Создать / сбросить поле", (_, _) => ResetField()));
+        left.Controls.Add(MakeLabel("Высота поля:"));
+        left.Controls.Add(heightBox);
+
+        left.Controls.Add(MakeLabel("Количество камней:"));
+        left.Controls.Add(stonesBox);
+
+        left.Controls.Add(MakeButton(
+            "Создать / Сбросить поле",
+            (_, _) => ResetField()));
+
         left.Controls.Add(Header("УПРАВЛЕНИЕ"));
-        left.Controls.Add(MakeButton("▶ Запуск", (_, _) => Start()));
-        left.Controls.Add(MakeButton("Ⅱ Пауза", (_, _) => Pause()));
-        left.Controls.Add(MakeButton("Один шаг", (_, _) => OneStep()));
-        left.Controls.Add(MakeButton("До завершения", (_, _) => Finish()));
-        left.Controls.Add(MakeButton("Сохранить PNG", (_, _) => SaveImage()));
 
-        var center = new Panel { Dock = DockStyle.Fill, Padding = new Padding(5), BackColor = Color.Black };
-        center.Controls.Add(picture);
-        layout.Controls.Add(center, 1, 0);
+        left.Controls.Add(MakeButton(
+            "▶ Запуск",
+            (_, _) => Start()));
 
-        var right = new TableLayoutPanel
+        left.Controls.Add(MakeButton(
+            "Ⅱ Пауза",
+            (_, _) => Pause()));
+
+        left.Controls.Add(MakeButton(
+            "Один шаг",
+            (_, _) => OneStep()));
+
+        left.Controls.Add(MakeButton(
+            "До завершения",
+            (_, _) => Finish()));
+
+        left.Controls.Add(MakeButton(
+            "Сохранить PNG",
+            (_, _) => SaveImage()));
+
+        left.Controls.Add(Header("ЦВЕТА КЛЕТОК"));
+
+        left.Controls.Add(MakeButton(
+            "Настроить цвета",
+            (_, _) => ConfigureColors()));
+
+        left.Controls.Add(Header("МАСШТАБ"));
+
+        left.Controls.Add(MakeButton(
+            "＋ Приблизить",
+            (_, _) => picture.ZoomBy(1.25f)));
+
+        left.Controls.Add(MakeButton(
+            "－ Отдалить",
+            (_, _) => picture.ZoomBy(0.8f)));
+
+        left.Controls.Add(MakeButton(
+            "Сброс масштаба",
+            (_, _) => picture.ResetZoom()));
+
+        left.Controls.Add(MakeButton(
+            "Вместить всё поле",
+            (_, _) => picture.FitImage()));
+
+        left.Controls.Add(MakeLabel(
+            "Колесо мыши — масштаб"));
+
+        left.Controls.Add(MakeLabel(
+            "Левая кнопка — перемещение"));
+
+        left.Controls.Add(status);
+
+        // Центральная панель
+
+        root.Controls.Add(picture, 1, 0);
+
+        // Правая панель
+
+        var right = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
-            RowCount = 3,
-            ColumnCount = 1,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
             Padding = new Padding(12),
-            BackColor = Color.FromArgb(36, 36, 42)
+            AutoScroll = true,
+            BackColor = Color.FromArgb(38, 38, 45)
         };
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
-        right.RowStyles.Add(new RowStyle(SizeType.Absolute, 180));
-        right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.Controls.Add(right, 2, 0);
-        right.Controls.Add(Header("СТАТИСТИКА"), 0, 0);
-        right.Controls.Add(stats, 0, 1);
-        right.Controls.Add(graph, 0, 2);
+
+        root.Controls.Add(right, 2, 0);
+
+        right.Controls.Add(Header("СТАТИСТИКА"));
+        right.Controls.Add(stats);
+
+        right.Controls.Add(Header("АКТИВНОСТЬ"));
+        right.Controls.Add(graph);
+
         graph.Paint += DrawGraph;
+    }
 
-        var legend = new Label
+    private static Label Header(string text)
+    {
+        return new Label
         {
-            Text = "ЦВЕТА КЛЕТОК\n\n■ 0 — чёрный\n■ 1 — медный\n■ 2 — зелёный\n■ 3 — белый",
-            ForeColor = Color.White,
-            BackColor = Color.FromArgb(36, 36, 42),
+            Text = text,
             AutoSize = true,
-            Padding = new Padding(5)
+            ForeColor = Color.FromArgb(255, 190, 90),
+            Font = new Font("Segoe UI", 11, FontStyle.Bold),
+            Margin = new Padding(0, 15, 0, 8)
         };
-        left.Controls.Add(legend);
-
-        status.Text = "Готово";
-        status.ForeColor = Color.LightGreen;
-        status.Padding = new Padding(3);
-        left.Controls.Add(status);
     }
 
-    private static Label Header(string text) => new()
+    private static Label MakeLabel(string text)
     {
-        Text = text,
-        AutoSize = true,
-        ForeColor = Color.FromArgb(255, 170, 90),
-        Font = new Font("Segoe UI", 11, FontStyle.Bold),
-        Margin = new Padding(3, 10, 3, 8)
-    };
-
-    private static NumericUpDown NumberBox(int value, int min, int max) => new()
-    {
-        Minimum = min,
-        Maximum = max,
-        Value = value,
-        Width = 190,
-        BackColor = Color.FromArgb(55, 55, 62),
-        ForeColor = Color.White
-    };
-
-    private static void AddField(Control parent, string title, Control control)
-    {
-        parent.Controls.Add(new Label
+        return new Label
         {
-            Text = title,
+            Text = text,
             AutoSize = true,
             ForeColor = Color.White,
-            Margin = new Padding(3, 8, 3, 2)
-        });
-        parent.Controls.Add(control);
+            Margin = new Padding(0, 7, 0, 3)
+        };
     }
 
-    private static Button MakeButton(string text, EventHandler action)
+    private static Button MakeButton(
+        string text,
+        EventHandler action)
     {
         var button = new Button
         {
             Text = text,
-            Width = 210,
+            Width = 205,
             Height = 36,
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(65, 65, 75),
             ForeColor = Color.White,
-            Margin = new Padding(3, 5, 3, 5)
+            Margin = new Padding(0, 4, 0, 4)
         };
-        button.FlatAppearance.BorderColor = Color.FromArgb(100, 100, 110);
+
+        button.FlatAppearance.BorderColor =
+            Color.FromArgb(100, 100, 115);
+
         button.Click += action;
+
         return button;
     }
+
+    // Выбор цветов
+
+    private void ConfigureColors()
+    {
+        string[] names =
+        {
+            "0 камней",
+            "1 камень",
+            "2 камня",
+            "3 и более камней"
+        };
+
+        for (int i = 0; i < cellColors.Length; i++)
+        {
+            using ColorDialog dialog = new ColorDialog
+            {
+                Color = cellColors[i],
+                FullOpen = true,
+                AnyColor = true
+            };
+
+            MessageBox.Show(
+                this,
+                $"Выберите цвет для состояния: {names[i]}",
+                "Настройка цветов",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+
+            if (dialog.ShowDialog(this) == DialogResult.OK)
+            {
+                cellColors[i] = dialog.Color;
+            }
+        }
+
+        RenderField();
+        status.Text = "Цвета обновлены";
+    }
+
+    // Создание поля
 
     private void ResetField()
     {
         Pause();
-        width = (int)widthBox.Value;
-        height = (int)heightBox.Value;
-        field = new int[height, width];
 
-        int x = width / 2;
-        int y = height / 2;
-        field[y, x] = (int)stonesBox.Value;
+        fieldWidth = (int)widthBox.Value;
+        fieldHeight = (int)heightBox.Value;
 
-        lost = 0;
-        totalSteps = 0;
-        history.Clear();
-        CountActive();
+        initialStones = (long)stonesBox.Value;
+
+        field = new Dictionary<int, long>();
+
+        int centerX = fieldWidth / 2;
+        int centerY = fieldHeight / 2;
+
+        int centerKey = centerY * fieldWidth + centerX;
+
+        field[centerKey] = initialStones;
+
+        steps = 0;
+        lostStones = 0;
+        activity.Clear();
+
+        activeCells = initialStones >= 4 ? 1 : 0;
+
         RenderField();
         UpdateStats();
-        status.Text = "Новое поле создано";
+
+        status.Text = "Поле создано";
     }
 
     private void Start()
     {
-        if (activeCells == 0) return;
-        finishMode = false;
-        running = true;
+        if (activeCells == 0)
+        {
+            status.Text = "Модель уже завершена";
+            return;
+        }
+
         timer.Start();
-        status.Text = "Симуляция выполняется";
+        status.Text = "Моделирование...";
     }
 
     private void Pause()
     {
-        running = false;
         timer.Stop();
         status.Text = "Пауза";
     }
@@ -217,183 +392,593 @@ public class MainForm : Form
     private void OneStep()
     {
         Pause();
+
         if (activeCells > 0)
         {
             Step();
-            RenderField();
-            UpdateStats();
+            status.Text = "Выполнен один шаг";
+        }
+        else
+        {
+            status.Text = "Модель завершена";
         }
     }
 
     private void Finish()
     {
-        if (activeCells == 0) return;
-        finishMode = true;
-        running = true;
-        timer.Start();
-        status.Text = "Расчёт до завершения";
+        Pause();
+
+        int counter = 0;
+
+        try
+        {
+            while (activeCells > 0)
+            {
+                Step(false);
+                counter++;
+
+                if (counter % 50 == 0)
+                {
+                    RenderField();
+                    UpdateStats();
+                    Application.DoEvents();
+                }
+            }
+
+            RenderField();
+            UpdateStats();
+
+            status.Text = "Моделирование завершено";
+        }
+        catch (OutOfMemoryException)
+        {
+            status.Text = "Недостаточно оперативной памяти";
+
+            MessageBox.Show(
+                this,
+                "Не хватает оперативной памяти для продолжения расчёта.",
+                "Ошибка памяти",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
     }
 
     private void TimerTick(object? sender, EventArgs e)
     {
-        if (!running) return;
-
-        int count = finishMode ? 20 : 1;
-        for (int i = 0; i < count && activeCells > 0; i++)
-            Step();
-
-        RenderField();
-        UpdateStats();
-
         if (activeCells == 0)
         {
             Pause();
-            status.Text = "Расчёт завершён";
+            status.Text = "Моделирование завершено";
+            return;
         }
-    }
 
-    private void Step()
-    {
-        int[,] delta = new int[height, width];
-
-        for (int y = 0; y < height; y++)
+        try
         {
-            for (int x = 0; x < width; x++)
+            Step();
+        }
+        catch (OutOfMemoryException)
+        {
+            Pause();
+
+            MessageBox.Show(
+                this,
+                "Недостаточно оперативной памяти для продолжения расчёта.",
+                "Ошибка памяти",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
+    // Добавление камней в словарь
+
+    private static void AddStones(
+        Dictionary<int, long> target,
+        int key,
+        long amount)
+    {
+        if (amount <= 0)
+            return;
+
+        if (target.TryGetValue(key, out long current))
+            target[key] = checked(current + amount);
+        else
+            target[key] = amount;
+    }
+
+    // Один параллельный шаг модели
+
+    private void Step(bool redraw = true)
+    {
+        var next = new Dictionary<int, long>(
+            Math.Max(field.Count, 16));
+
+        long lostThisStep = 0;
+        int nextActive = 0;
+
+        foreach (var item in field)
+        {
+            int key = item.Key;
+            long stones = item.Value;
+
+            int x = key % fieldWidth;
+            int y = key / fieldWidth;
+
+            if (stones < 4)
             {
-                int stones = field[y, x];
-                int give = stones / 4;
-                if (give == 0) continue;
-
-                field[y, x] -= give * 4;
-
-                if (y > 0) delta[y - 1, x] += give;
-else lost += give;
-
-                if (y < height - 1) delta[y + 1, x] += give;
-                else lost += give;
-
-                if (x > 0) delta[y, x - 1] += give;
-                else lost += give;
-
-                if (x < width - 1) delta[y, x + 1] += give;
-                else lost += give;
+                AddStones(next, key, stones);
+                continue;
             }
+
+            long share = stones / 4;
+            long remainder = stones % 4;
+
+            AddStones(next, key, remainder);
+
+            if (x > 0)
+                AddStones(next, key - 1, share);
+            else
+                lostThisStep += share;
+
+            if (x < fieldWidth - 1)
+                AddStones(next, key + 1, share);
+            else
+                lostThisStep += share;
+
+            if (y > 0)
+                AddStones(next, key - fieldWidth, share);
+            else
+                lostThisStep += share;
+
+            if (y < fieldHeight - 1)
+                AddStones(next, key + fieldWidth, share);
+            else
+                lostThisStep += share;
         }
 
-        for (int y = 0; y < height; y++)
-            for (int x = 0; x < width; x++)
-                field[y, x] += delta[y, x];
+        foreach (long value in next.Values)
+        {
+            if (value >= 4)
+                nextActive++;
+        }
 
-        totalSteps++;
-        CountActive();
+        field = next;
 
-        if (history.Count >= 500) history.RemoveAt(0);
-        history.Add(activeCells);
+        steps++;
+        lostStones += lostThisStep;
+
+        activeCells = nextActive;
+
+        activity.Add(activeCells);
+
+        if (activity.Count > MaxGraphPoints)
+            activity.RemoveAt(0);
+
+        if (redraw)
+        {
+            RenderField();
+            UpdateStats();
+        }
     }
 
-    private void CountActive()
-    {
-        activeCells = 0;
-        for (int y = 0; y < height; y++)
-            for (int x = 0; x < width; x++)
-                if (field[y, x] >= 4) activeCells++;
-    }
+    // Отрисовка уменьшенного изображения
 
     private void RenderField()
     {
-        int scale = Math.Max(1, (int)Math.Ceiling(Math.Max(width, height) / 1000.0));
-        int imageWidth = (width + scale - 1) / scale;
-        int imageHeight = (height + scale - 1) / scale;
+        int previewWidth = Math.Min(
+            fieldWidth,
+            MaxPreviewSize);
 
-        var bitmap = new Bitmap(imageWidth, imageHeight);
-        Color[] colors =
-        {
-            Color.Black,
-            Color.FromArgb(184, 115, 51),
-            Color.LimeGreen,
-            Color.White
-        };
+        int previewHeight = Math.Min(
+            fieldHeight,
+            MaxPreviewSize);
 
-        for (int py = 0; py < imageHeight; py++)
+        using Bitmap bitmap = new Bitmap(
+            previewWidth,
+            previewHeight,
+            PixelFormat.Format32bppArgb);
+
+        int[] pixels = new int[previewWidth * previewHeight];
+
+        // По умолчанию все клетки имеют цвет нулевого состояния.
+
+        int zeroColor = cellColors[0].ToArgb();
+        Array.Fill(pixels, zeroColor);
+
+        // Если несколько клеток попадают в один пиксель,
+        // показываем наиболее высокий уровень.
+
+        byte[] levels = new byte[previewWidth * previewHeight];
+
+        foreach (var item in field)
         {
-            for (int px = 0; px < imageWidth; px++)
+            int key = item.Key;
+
+            int x = key % fieldWidth;
+            int y = key / fieldWidth;
+
+            int px = x * previewWidth / fieldWidth;
+            int py = y * previewHeight / fieldHeight;
+
+            int index = py * previewWidth + px;
+
+            byte level = item.Value switch
             {
-                int value = field[Math.Min(py * scale, height - 1), Math.Min(px * scale, width - 1)];
-                bitmap.SetPixel(px, py, colors[value % 4]);
-            }
+                1 => 1,
+                2 => 2,
+                _ => 3
+            };
+
+            if (level > levels[index])
+                levels[index] = level;
         }
 
-        var old = currentBitmap;
-        currentBitmap = bitmap;
-        picture.Image = bitmap;
-        old?.Dispose();
+        int[] colorValues =
+        {
+            cellColors[0].ToArgb(),
+            cellColors[1].ToArgb(),
+            cellColors[2].ToArgb(),
+            cellColors[3].ToArgb()
+        };
+
+        for (int i = 0; i < pixels.Length; i++)
+        {
+            pixels[i] = colorValues[levels[i]];
+        }
+
+        Rectangle rect = new Rectangle(
+            0, 0, previewWidth, previewHeight);
+
+        BitmapData data = bitmap.LockBits(
+            rect,
+            ImageLockMode.WriteOnly,
+            PixelFormat.Format32bppArgb);
+
+        try
+        {
+            for (int y = 0; y < previewHeight; y++)
+            {
+                IntPtr row = IntPtr.Add(
+                    data.Scan0,
+                    y * data.Stride);
+
+                Marshal.Copy(
+                    pixels,
+                    y * previewWidth,
+                    row,
+                    previewWidth);
+            }
+        }
+        finally
+        {
+            bitmap.UnlockBits(data);
+        }
+
+        picture.Image = new Bitmap(bitmap);
     }
+
+    // Статистика
 
     private void UpdateStats()
     {
         long total = 0;
-        for (int y = 0; y < height; y++)
-            for (int x = 0; x < width; x++)
-                total += field[y, x];
+
+        foreach (long value in field.Values)
+            total = checked(total + value);
 
         stats.Text =
-            $"Размер: {width} × {height}\n\n" +
-            $"Шагов: {totalSteps}\n\n" +
-            $"Активных клеток: {activeCells}\n\n" +
-            $"Камушков на поле: {total:N0}\n\n" +
-            $"Потеряно за границей: {lost:N0}\n\n" +
-            $"Состояние: {(running ? "Работает" : "Остановлено")}";
+            $"Размер поля: {fieldWidth} × {fieldHeight}\n\n" +
+            $"Шагов: {steps:N0}\n\n" +
+            $"Камней осталось: {total:N0}\n\n" +
+            $"Потеряно за границами: {lostStones:N0}\n\n" +
+            $"Активных клеток: {activeCells:N0}\n\n" +
+            $"Начальное количество: {initialStones:N0}\n\n" +
+            $"Занятых клеток: {field.Count:N0}";
 
         graph.Invalidate();
     }
 
+    // График активности
+
     private void DrawGraph(object? sender, PaintEventArgs e)
     {
-        var g = e.Graphics;
-        g.Clear(Color.FromArgb(20, 20, 24));
+        Graphics g = e.Graphics;
 
-        using var pen = new Pen(Color.LimeGreen, 2);
-        using var gridPen = new Pen(Color.FromArgb(55, 55, 60));
+        g.Clear(Color.FromArgb(35, 35, 42));
 
-        for (int i = 1; i < 5; i++)
+        if (activity.Count < 2)
+            return;
+
+        int max = 1;
+
+        foreach (int value in activity)
+            max = Math.Max(max, value);
+
+        int width = graph.ClientSize.Width - 20;
+        int height = graph.ClientSize.Height - 30;
+
+        if (width <= 0 || height <= 0)
+            return;
+
+        using Pen pen = new Pen(
+            Color.FromArgb(255, 180, 70), 2);
+
+        PointF[] points = new PointF[activity.Count];
+
+        for (int i = 0; i < activity.Count; i++)
         {
-            int y = i * graph.Height / 5;
-            g.DrawLine(gridPen, 0, y, graph.Width, y);
-        }
+            float x = 10 +
+                (float)i / (activity.Count - 1) * width;
 
-        if (history.Count < 2) return;
+            float y = 10 +
+                height -
+                (float)activity[i] / max * height;
 
-        int max = Math.Max(1, history.Max());
-        PointF[] points = new PointF[history.Count];
-
-        for (int i = 0; i < history.Count; i++)
-        {
-            float x = i * (graph.Width - 1f) / Math.Max(1, history.Count - 1);
-            float y = graph.Height - 5 - history[i] * (graph.Height - 10f) / max;
             points[i] = new PointF(x, y);
         }
 
         g.DrawLines(pen, points);
     }
 
+    // Сохранение PNG
+
     private void SaveImage()
     {
-        if (currentBitmap == null) return;
+        if (picture.Image == null)
+            return;
 
-        using var dialog = new SaveFileDialog
+        using SaveFileDialog dialog = new SaveFileDialog
         {
-            Filter = "PNG image|*.png",
+            Filter = "PNG Image|*.png",
             FileName = "Sandpile.png"
         };
 
-        if (dialog.ShowDialog() == DialogResult.OK)
-            currentBitmap.Save(dialog.FileName, ImageFormat.Png);
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            picture.Image.Save(
+                dialog.FileName,
+                ImageFormat.Png);
+
+            status.Text = "Изображение сохранено";
+        }
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         timer.Stop();
-        currentBitmap?.Dispose();
+        timer.Dispose();
+
+        picture.Image = null;
+
         base.OnFormClosed(e);
     }
 }
+
+// Отображение поля, масштабирование и перемещение
+
+public class SandpileView : Control
+{
+    private Image? image;
+
+    private float zoom = 1f;
+    private float offsetX;
+    private float offsetY;
+
+    private bool dragging;
+    private bool fitMode = true;
+
+    private Point lastMouse;
+
+    public Image? Image
+    {
+        get => image;
+
+        set
+        {
+            if (image != value)
+                image?.Dispose();
+
+            image = value;
+
+            FitImage();
+            Invalidate();
+        }
+    }
+
+    public SandpileView()
+    {
+        DoubleBuffered = true;
+        ResizeRedraw = true;
+        TabStop = true;
+        BackColor = Color.Black;
+    }
+
+    private float FitScale()
+    {
+        if (image == null ||
+            ClientSize.Width <= 0 ||
+            ClientSize.Height <= 0)
+            return 1f;
+
+        return Math.Min(
+            (float)ClientSize.Width / image.Width,
+            (float)ClientSize.Height / image.Height);
+    }
+
+    public void FitImage()
+    {
+        zoom = 1f;
+        fitMode = true;
+
+        CenterImage();
+        Invalidate();
+    }
+
+    public void ResetZoom()
+    {
+        FitImage();
+    }
+
+    private void CenterImage()
+    {
+        if (image == null)
+            return;
+
+        float scale = FitScale() * zoom;
+
+        offsetX =
+            (ClientSize.Width - image.Width * scale) / 2f;
+
+        offsetY =
+            (ClientSize.Height - image.Height * scale) / 2f;
+    }
+
+    public void ZoomBy(float factor)
+    {
+        ZoomAt(
+            factor,
+            new Point(
+                ClientSize.Width / 2,
+                ClientSize.Height / 2));
+    }
+
+    private void ZoomAt(float factor, Point cursor)
+    {
+        if (image == null)
+            return;
+
+        float oldScale = FitScale() * zoom;
+
+        float newZoom = Math.Clamp(
+            zoom * factor,
+            0.1f,
+            50f);
+
+        float newScale = FitScale() * newZoom;
+
+        if (oldScale <= 0 || newScale <= 0)
+            return;
+
+        float imageX = (cursor.X - offsetX) / oldScale;
+        float imageY = (cursor.Y - offsetY) / oldScale;
+
+        offsetX = cursor.X - imageX * newScale;
+        offsetY = cursor.Y - imageY * newScale;
+
+        zoom = newZoom;
+        fitMode = false;
+
+        Invalidate();
+    }
+
+    protected override void OnMouseEnter(EventArgs e)
+    {
+        Focus();
+        base.OnMouseEnter(e);
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        ZoomAt(
+            e.Delta > 0 ? 1.2f : 0.8f,
+            e.Location);
+
+        base.OnMouseWheel(e);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        Focus();
+
+        if (e.Button == MouseButtons.Left)
+        {
+            dragging = true;
+            lastMouse = e.Location;
+            Cursor = Cursors.Hand;
+        }
+
+        base.OnMouseDown(e);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        if (dragging)
+        {
+            offsetX += e.X - lastMouse.X;
+            offsetY += e.Y - lastMouse.Y;
+
+            lastMouse = e.Location;
+
+            fitMode = false;
+
+            Invalidate();
+        }
+
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left)
+        {
+            dragging = false;
+            Cursor = Cursors.Default;
+        }
+
+        base.OnMouseUp(e);
+    }
+
+    protected override void OnMouseCaptureChanged(EventArgs e)
+    {
+        dragging = false;
+        Cursor = Cursors.Default;
+
+        base.OnMouseCaptureChanged(e);
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+
+        if (fitMode)
+            CenterImage();
+
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+
+        e.Graphics.Clear(Color.Black);
+
+        if (image == null)
+            return;
+
+        float scale = FitScale() * zoom;
+
+        e.Graphics.InterpolationMode =
+            InterpolationMode.NearestNeighbor;
+
+        e.Graphics.PixelOffsetMode =
+            PixelOffsetMode.Half;
+
+        e.Graphics.DrawImage(
+            image,
+            offsetX,
+            offsetY,
+            image.Width * scale,
+            image.Height * scale);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            image?.Dispose();
+            image = null;
+        }
+
+        base.Dispose(disposing);
+    }
+}
+
